@@ -1,3 +1,4 @@
+import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib"
 import { decompress } from "fzstd"
 import { createCache } from "./cache.js"
 import {
@@ -94,7 +95,7 @@ export const createDocsFetcher = (config: ServerConfig = {}) => {
 				throw new NetworkError(url, response.status, response.statusText)
 			}
 
-			// Check if response needs manual decompression (shouldn't be needed with Bun's auto-decompression)
+			// Check if response needs manual decompression
 			const encoding = response.headers.get("content-encoding")
 			const contentType = response.headers.get("content-type")
 			let data: any
@@ -106,22 +107,63 @@ export const createDocsFetcher = (config: ServerConfig = {}) => {
 				encoding
 			})
 
-			if (encoding === "zstd" || encoding === "Zstd") {
+			// Handle different compression formats
+			// Check both content-encoding and content-type for compression indicators
+			const isCompressed =
+				(encoding && encoding !== "identity") ||
+				(contentType &&
+					(contentType.includes("zstd") ||
+						contentType.includes("gzip") ||
+						contentType.includes("deflate")))
+
+			if (isCompressed) {
 				try {
-					// docs.rs always serves rustdoc JSON with zstd compression
 					const buffer = await response.arrayBuffer()
-					ErrorLogger.logInfo("Decompressing zstd content", {
+					const uint8Array = new Uint8Array(buffer)
+					let decompressed: Uint8Array
+
+					ErrorLogger.logInfo("Decompressing content", {
 						url,
+						encoding,
 						bufferSize: buffer.byteLength
 					})
 
-					// Use fzstd which handles memory allocation better than other libraries
-					// fzstd reads frame headers to determine memory requirements
-					const decompressed = decompress(new Uint8Array(buffer))
+					// Determine compression type from either content-encoding or content-type
+					const compressionType =
+						encoding ||
+						(contentType?.includes("zstd")
+							? "zstd"
+							: contentType?.includes("gzip")
+								? "gzip"
+								: contentType?.includes("deflate")
+									? "deflate"
+									: "unknown")
+
+					switch (compressionType.toLowerCase()) {
+						case "zstd":
+							// Use fzstd which handles memory allocation better than other libraries
+							// fzstd reads frame headers to determine memory requirements
+							decompressed = decompress(uint8Array)
+							break
+						case "gzip":
+							decompressed = new Uint8Array(gunzipSync(uint8Array))
+							break
+						case "deflate":
+							decompressed = new Uint8Array(inflateSync(uint8Array))
+							break
+						case "br":
+						case "brotli":
+							decompressed = new Uint8Array(brotliDecompressSync(uint8Array))
+							break
+						default:
+							throw new Error(`Unsupported compression format: ${compressionType}`)
+					}
+
 					const jsonText = new TextDecoder().decode(decompressed)
 
 					ErrorLogger.logInfo("Decompression successful", {
 						url,
+						compressionType,
 						decompressedSize: jsonText.length
 					})
 
@@ -134,22 +176,35 @@ export const createDocsFetcher = (config: ServerConfig = {}) => {
 					if (error instanceof JSONParseError) {
 						throw error
 					}
-					throw new DecompressionError(url, "zstd", (error as Error).message)
+					throw new DecompressionError(url, encoding || "unknown", (error as Error).message)
 				}
 			} else {
-				// Normal JSON response (Bun handles decompression automatically)
+				// No compression or identity encoding - try Bun's automatic handling first
 				try {
-					// First get the response as text to have better error reporting
+					// First try to get the response as text (Bun should handle any auto-decompression)
 					const responseText = await response.text()
 
 					if (!responseText || responseText.trim().length === 0) {
 						throw new JSONParseError("", new Error("Empty response body"), url)
 					}
 
-					try {
-						data = JSON.parse(responseText)
-					} catch (parseError) {
-						throw new JSONParseError(responseText, parseError as Error, url)
+					// Check if we got binary data that looks compressed (fallback detection)
+					if (responseText.charCodeAt(0) === 0x1f && responseText.charCodeAt(1) === 0x8b) {
+						// This looks like gzip magic bytes, try manual decompression
+						ErrorLogger.logInfo(
+							"Detected gzip magic bytes, attempting manual decompression",
+							{ url }
+						)
+						const buffer = await response.arrayBuffer()
+						const decompressed = new Uint8Array(gunzipSync(new Uint8Array(buffer)))
+						const jsonText = new TextDecoder().decode(decompressed)
+						data = JSON.parse(jsonText)
+					} else {
+						try {
+							data = JSON.parse(responseText)
+						} catch (parseError) {
+							throw new JSONParseError(responseText, parseError as Error, url)
+						}
 					}
 				} catch (error) {
 					if (error instanceof JSONParseError) {

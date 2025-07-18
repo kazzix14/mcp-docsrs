@@ -300,14 +300,15 @@ export const ErrorLogger = {
 		console.warn(`[${timestamp}] WARNING: ${message}${contextStr}`)
 	},
 
-	logInfo(message: string, context?: Record<string, unknown>): void {
+	logInfo(_message: string, _context?: Record<string, unknown>): void {
 		// Skip info logging during tests or when silent mode is enabled
 		if (process.env.SILENT_LOGS === "true" || process.env.MCP_TEST === "true") {
 			return
 		}
-		const timestamp = new Date().toISOString()
-		const contextStr = context ? ` - Context: ${JSON.stringify(context)}` : ""
-		console.info(`[${timestamp}] INFO: ${message}${contextStr}`)
+		// this breaks claude code
+		// const timestamp = new Date().toISOString()
+		// const contextStr = context ? ` - Context: ${JSON.stringify(context)}` : ""
+		// console.info(`[${timestamp}] INFO: ${message}${contextStr}`)
 	}
 }
 
